@@ -122,6 +122,8 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     // to have higher consistency between index builds.
     DISKANN_DLLEXPORT void set_start_points_at_random(T radius, uint32_t random_seed = 0);
 
+    DISKANN_DLLEXPORT virtual void set_search_entry_points(const std::vector<uint32_t> &entry_points) override;
+
     // For FastL2 search on a static index, we interleave the data with graph
     DISKANN_DLLEXPORT void optimize_index_layout();
 
@@ -364,6 +366,8 @@ template <typename T, typename TagT = uint32_t, typename LabelT = uint32_t> clas
     //  this is the location of the first frozen point. Otherwise, this is a
     //  location of one of the points in index.
     uint32_t _start = 0;
+
+    std::vector<uint32_t> _search_entry_points;
 
     bool _has_built = false;
     bool _saturate_graph = false;

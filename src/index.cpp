@@ -735,16 +735,29 @@ template <typename T, typename TagT, typename LabelT> uint32_t Index<T, TagT, La
     return _data_store->calculate_medoid();
 }
 
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::set_search_entry_points(const std::vector<uint32_t> &entry_points)
+{
+    _search_entry_points = entry_points;
+}
+
 template <typename T, typename TagT, typename LabelT> std::vector<uint32_t> Index<T, TagT, LabelT>::get_init_ids()
 {
     std::vector<uint32_t> init_ids;
-    init_ids.reserve(1 + _num_frozen_pts);
+    init_ids.reserve((_search_entry_points.empty() ? 1 : _search_entry_points.size()) + _num_frozen_pts);
 
-    init_ids.emplace_back(_start);
+    if (_search_entry_points.empty())
+    {
+        init_ids.emplace_back(_start);
+    }
+    else
+    {
+        init_ids.insert(init_ids.end(), _search_entry_points.begin(), _search_entry_points.end());
+    }
 
     for (uint32_t frozen = (uint32_t)_max_points; frozen < _max_points + _num_frozen_pts; frozen++)
     {
-        if (frozen != _start)
+        if (std::find(init_ids.begin(), init_ids.end(), frozen) == init_ids.end())
         {
             init_ids.emplace_back(frozen);
         }
@@ -3239,28 +3252,46 @@ void Index<T, TagT, LabelT>::search_with_optimized_layout(const T *query, size_t
     DistanceFastL2<T> *dist_fast = (DistanceFastL2<T> *)(_data_store->get_dist_fn());
 
     NeighborPriorityQueue retset(L);
-    std::vector<uint32_t> init_ids(L);
+    std::vector<uint32_t> init_ids;
+    init_ids.reserve(L);
 
     boost::dynamic_bitset<> flags{_nd, 0};
     uint32_t tmp_l = 0;
-    uint32_t *neighbors = (uint32_t *)(_opt_graph + _node_size * _start + _data_len);
-    uint32_t MaxM_ep = *neighbors;
-    neighbors++;
-
-    for (; tmp_l < L && tmp_l < MaxM_ep; tmp_l++)
+    uint32_t *neighbors = nullptr;
+    if (!_search_entry_points.empty())
     {
-        init_ids[tmp_l] = neighbors[tmp_l];
-        flags[init_ids[tmp_l]] = true;
+        for (auto id : _search_entry_points)
+        {
+            if (tmp_l >= L)
+                break;
+            if (id >= _nd || flags[id])
+                continue;
+            init_ids.emplace_back(id);
+            flags[id] = true;
+            tmp_l++;
+        }
     }
-
-    while (tmp_l < L)
+    else
     {
-        uint32_t id = rand() % _nd;
-        if (flags[id])
-            continue;
-        flags[id] = true;
-        init_ids[tmp_l] = id;
-        tmp_l++;
+        neighbors = (uint32_t *)(_opt_graph + _node_size * _start + _data_len);
+        uint32_t MaxM_ep = *neighbors;
+        neighbors++;
+
+        for (; tmp_l < L && tmp_l < MaxM_ep; tmp_l++)
+        {
+            init_ids.emplace_back(neighbors[tmp_l]);
+            flags[init_ids.back()] = true;
+        }
+
+        while (tmp_l < L)
+        {
+            uint32_t id = rand() % _nd;
+            if (flags[id])
+                continue;
+            flags[id] = true;
+            init_ids.emplace_back(id);
+            tmp_l++;
+        }
     }
 
     for (uint32_t i = 0; i < init_ids.size(); i++)

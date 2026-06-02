@@ -200,6 +200,12 @@ std::vector<bool> PQFlashIndex<T, LabelT>::read_nodes(const std::vector<uint32_t
     return retval;
 }
 
+template <typename T, typename LabelT>
+void PQFlashIndex<T, LabelT>::set_search_entry_points(const std::vector<uint32_t> &entry_points)
+{
+    _search_entry_points = entry_points;
+}
+
 template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_list(std::vector<uint32_t> &node_list)
 {
     diskann::cout << "Loading the cache list into memory.." << std::flush;
@@ -1358,48 +1364,65 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     retset.reserve(l_search);
     std::vector<Neighbor> &full_retset = query_scratch->full_retset;
 
-    uint32_t best_medoid = 0;
-    float best_dist = (std::numeric_limits<float>::max)();
-    if (!use_filter)
+    if (!_search_entry_points.empty())
     {
-        for (uint64_t cur_m = 0; cur_m < _num_medoids; cur_m++)
+        for (uint32_t entry_point : _search_entry_points)
         {
-            float cur_expanded_dist =
-                _dist_cmp_float->compare(query_float, _centroid_data + _aligned_dim * cur_m, (uint32_t)_aligned_dim);
-            if (cur_expanded_dist < best_dist)
+            if (entry_point >= _num_points)
             {
-                best_medoid = _medoids[cur_m];
-                best_dist = cur_expanded_dist;
+                throw ANNException("Entry point id is out of range for disk index.", -1, __FUNCSIG__, __FILE__,
+                                   __LINE__);
             }
+            compute_dists(&entry_point, 1, dist_scratch);
+            retset.insert(Neighbor(entry_point, dist_scratch[0]));
+            visited.insert(entry_point);
         }
     }
     else
     {
-        if (_filter_to_medoid_ids.find(filter_label) != _filter_to_medoid_ids.end())
+        uint32_t best_medoid = 0;
+        float best_dist = (std::numeric_limits<float>::max)();
+        if (!use_filter)
         {
-            const auto &medoid_ids = _filter_to_medoid_ids[filter_label];
-            for (uint64_t cur_m = 0; cur_m < medoid_ids.size(); cur_m++)
+            for (uint64_t cur_m = 0; cur_m < _num_medoids; cur_m++)
             {
-                // for filtered index, we dont store global centroid data as for unfiltered index, so we use PQ distance
-                // as approximation to decide closest medoid matching the query filter.
-                compute_dists(&medoid_ids[cur_m], 1, dist_scratch);
-                float cur_expanded_dist = dist_scratch[0];
+                float cur_expanded_dist =
+                    _dist_cmp_float->compare(query_float, _centroid_data + _aligned_dim * cur_m, (uint32_t)_aligned_dim);
                 if (cur_expanded_dist < best_dist)
                 {
-                    best_medoid = medoid_ids[cur_m];
+                    best_medoid = _medoids[cur_m];
                     best_dist = cur_expanded_dist;
                 }
             }
         }
         else
         {
-            throw ANNException("Cannot find medoid for specified filter.", -1, __FUNCSIG__, __FILE__, __LINE__);
+            if (_filter_to_medoid_ids.find(filter_label) != _filter_to_medoid_ids.end())
+            {
+                const auto &medoid_ids = _filter_to_medoid_ids[filter_label];
+                for (uint64_t cur_m = 0; cur_m < medoid_ids.size(); cur_m++)
+                {
+                    // for filtered index, we dont store global centroid data as for unfiltered index, so we use PQ distance
+                    // as approximation to decide closest medoid matching the query filter.
+                    compute_dists(&medoid_ids[cur_m], 1, dist_scratch);
+                    float cur_expanded_dist = dist_scratch[0];
+                    if (cur_expanded_dist < best_dist)
+                    {
+                        best_medoid = medoid_ids[cur_m];
+                        best_dist = cur_expanded_dist;
+                    }
+                }
+            }
+            else
+            {
+                throw ANNException("Cannot find medoid for specified filter.", -1, __FUNCSIG__, __FILE__, __LINE__);
+            }
         }
-    }
 
-    compute_dists(&best_medoid, 1, dist_scratch);
-    retset.insert(Neighbor(best_medoid, dist_scratch[0]));
-    visited.insert(best_medoid);
+        compute_dists(&best_medoid, 1, dist_scratch);
+        retset.insert(Neighbor(best_medoid, dist_scratch[0]));
+        visited.insert(best_medoid);
+    }
 
     uint32_t cmps = 0;
     uint32_t hops = 0;

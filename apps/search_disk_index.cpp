@@ -3,6 +3,7 @@
 
 #include "common_includes.h"
 #include <boost/program_options.hpp>
+#include <unordered_set>
 
 #include "index.h"
 #include "disk_utils.h"
@@ -31,6 +32,47 @@
 
 namespace po = boost::program_options;
 
+
+std::vector<uint32_t> read_entry_points_file(const std::string &entry_points_file)
+{
+    std::ifstream reader(entry_points_file);
+    if (!reader.is_open())
+    {
+        throw diskann::ANNException("Failed to open entry points file: " + entry_points_file, -1);
+    }
+
+    std::vector<uint32_t> entry_points;
+    std::unordered_set<uint32_t> seen;
+    std::string line;
+    uint32_t line_no = 0;
+    while (std::getline(reader, line))
+    {
+        line_no++;
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos)
+            continue;
+
+        std::istringstream iss(line);
+        uint64_t id = 0;
+        std::string extra;
+        if (!(iss >> id) || (iss >> extra) || id > std::numeric_limits<uint32_t>::max())
+        {
+            throw diskann::ANNException("Invalid entry point id at line " + std::to_string(line_no) + " in " +
+                                            entry_points_file,
+                                        -1);
+        }
+
+        uint32_t id32 = (uint32_t)id;
+        if (seen.insert(id32).second)
+            entry_points.emplace_back(id32);
+    }
+
+    if (entry_points.empty())
+    {
+        throw diskann::ANNException("Entry points file is empty: " + entry_points_file, -1);
+    }
+    return entry_points;
+}
+
 void print_stats(std::string category, std::vector<float> percentiles, std::vector<float> results)
 {
     diskann::cout << std::setw(20) << category << ": " << std::flush;
@@ -53,7 +95,8 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
                       const uint32_t num_threads, const uint32_t recall_at, const uint32_t beamwidth,
                       const uint32_t num_nodes_to_cache, const uint32_t search_io_limit,
                       const std::vector<uint32_t> &Lvec, const float fail_if_recall_below,
-                      const std::vector<std::string> &query_filters, const bool use_reorder_data = false)
+                      const std::vector<std::string> &query_filters, const std::vector<uint32_t> &entry_points,
+                      const bool use_reorder_data = false)
 {
     diskann::cout << "Search parameters: #threads: " << num_threads << ", ";
     if (beamwidth <= 0)
@@ -117,6 +160,12 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
     if (res != 0)
     {
         return res;
+    }
+
+    if (!entry_points.empty())
+    {
+        diskann::cout << "Using " << entry_points.size() << " search entry point(s) from file." << std::endl;
+        _pFlashIndex->set_search_entry_points(entry_points);
     }
 
     std::vector<uint32_t> node_list;
@@ -313,7 +362,7 @@ int search_disk_index(diskann::Metric &metric, const std::string &index_path_pre
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path_prefix, query_file, gt_file, filter_label,
-        label_type, query_filters_file;
+        label_type, query_filters_file, entry_points_file;
     uint32_t num_threads, K, W, num_nodes_to_cache, search_io_limit;
     std::vector<uint32_t> Lvec;
     bool use_reorder_data = false;
@@ -372,6 +421,9 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()("entry_points_file",
+                                       po::value<std::string>(&entry_points_file)->default_value(std::string("")),
+                                       "Optional text file with one uint32 node id per line. If set, these nodes initialize the search candidate pool.");
 
         // Merge required and optional parameters
         desc.add(required_configs).add(optional_configs);
@@ -434,6 +486,25 @@ int main(int argc, char **argv)
         return -1;
     }
 
+    std::vector<uint32_t> entry_points;
+    if (entry_points_file != "")
+    {
+        entry_points = read_entry_points_file(entry_points_file);
+        uint32_t min_search_l = std::numeric_limits<uint32_t>::max();
+        for (auto search_l : Lvec)
+        {
+            if (search_l >= K)
+                min_search_l = std::min(min_search_l, search_l);
+        }
+        if (min_search_l != std::numeric_limits<uint32_t>::max() && entry_points.size() > min_search_l)
+        {
+            std::cerr << "entry_points_file contains " << entry_points.size()
+                      << " unique entries, which exceeds min active search_list L=" << min_search_l
+                      << ". Reduce entries or increase all active L values." << std::endl;
+            return -1;
+        }
+    }
+
     std::vector<std::string> query_filters;
     if (filter_label != "")
     {
@@ -451,15 +522,15 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path_prefix, query_file, gt_file, num_threads, K, W,
-                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, use_reorder_data);
+                    num_nodes_to_cache, search_io_limit, Lvec, fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;
@@ -471,15 +542,15 @@ int main(int argc, char **argv)
             if (data_type == std::string("float"))
                 return search_disk_index<float>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                 num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                fail_if_recall_below, query_filters, use_reorder_data);
+                                                fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else if (data_type == std::string("int8"))
                 return search_disk_index<int8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                  num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                 fail_if_recall_below, query_filters, use_reorder_data);
+                                                 fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else if (data_type == std::string("uint8"))
                 return search_disk_index<uint8_t>(metric, index_path_prefix, result_path_prefix, query_file, gt_file,
                                                   num_threads, K, W, num_nodes_to_cache, search_io_limit, Lvec,
-                                                  fail_if_recall_below, query_filters, use_reorder_data);
+                                                  fail_if_recall_below, query_filters, entry_points, use_reorder_data);
             else
             {
                 std::cerr << "Unsupported data type. Use float or int8 or uint8" << std::endl;

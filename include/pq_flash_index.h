@@ -46,6 +46,8 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
 
     DISKANN_DLLEXPORT void load_cache_list(std::vector<uint32_t> &node_list);
 
+    DISKANN_DLLEXPORT void set_search_entry_points(const std::vector<uint32_t> &entry_points);
+
 #ifdef EXEC_ENV_OLS
     DISKANN_DLLEXPORT void generate_cache_list_from_sample_queries(MemoryMappedFiles &files, std::string sample_bin,
                                                                    uint64_t l_search, uint64_t beamwidth,
@@ -204,6 +206,7 @@ template <typename T, typename LabelT = uint32_t> class PQFlashIndex
     // centroids, we pick the medoid corresponding to the
     // closest centroid as the starting point of search
     float *_centroid_data = nullptr;
+    std::vector<uint32_t> _search_entry_points;
 
     // nhood_cache; the uint32_t in nhood_Cache are offsets into nhood_cache_buf
     unsigned *_nhood_cache_buf = nullptr;

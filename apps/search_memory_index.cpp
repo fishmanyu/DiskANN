@@ -9,6 +9,7 @@
 #include <set>
 #include <string.h>
 #include <boost/program_options.hpp>
+#include <unordered_set>
 
 #ifndef _WINDOWS
 #include <sys/mman.h>
@@ -25,12 +26,54 @@
 
 namespace po = boost::program_options;
 
+
+std::vector<uint32_t> read_entry_points_file(const std::string &entry_points_file)
+{
+    std::ifstream reader(entry_points_file);
+    if (!reader.is_open())
+    {
+        throw diskann::ANNException("Failed to open entry points file: " + entry_points_file, -1);
+    }
+
+    std::vector<uint32_t> entry_points;
+    std::unordered_set<uint32_t> seen;
+    std::string line;
+    uint32_t line_no = 0;
+    while (std::getline(reader, line))
+    {
+        line_no++;
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos)
+            continue;
+
+        std::istringstream iss(line);
+        uint64_t id = 0;
+        std::string extra;
+        if (!(iss >> id) || (iss >> extra) || id > std::numeric_limits<uint32_t>::max())
+        {
+            throw diskann::ANNException("Invalid entry point id at line " + std::to_string(line_no) + " in " +
+                                            entry_points_file,
+                                        -1);
+        }
+
+        uint32_t id32 = (uint32_t)id;
+        if (seen.insert(id32).second)
+            entry_points.emplace_back(id32);
+    }
+
+    if (entry_points.empty())
+    {
+        throw diskann::ANNException("Entry points file is empty: " + entry_points_file, -1);
+    }
+    return entry_points;
+}
+
 template <typename T, typename LabelT = uint32_t>
 int search_memory_index(diskann::Metric &metric, const std::string &index_path, const std::string &result_path_prefix,
                         const std::string &query_file, const std::string &truthset_file, const uint32_t num_threads,
                         const uint32_t recall_at, const bool print_all_recalls, const std::vector<uint32_t> &Lvec,
                         const bool dynamic, const bool tags, const bool show_qps_per_thread,
-                        const std::vector<std::string> &query_filters, const float fail_if_recall_below)
+                        const std::vector<std::string> &query_filters, const std::vector<uint32_t> &entry_points,
+                        const float fail_if_recall_below)
 {
     using TagT = uint32_t;
     // Load the query file
@@ -92,6 +135,11 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
     auto index = index_factory.create_instance();
     index->load(index_path.c_str(), num_threads, *(std::max_element(Lvec.begin(), Lvec.end())));
     std::cout << "Index loaded" << std::endl;
+    if (!entry_points.empty())
+    {
+        std::cout << "Using " << entry_points.size() << " search entry point(s) from file." << std::endl;
+        index->set_search_entry_points(entry_points);
+    }
 
     if (metric == diskann::FAST_L2)
         index->optimize_index_layout();
@@ -278,7 +326,7 @@ int search_memory_index(diskann::Metric &metric, const std::string &index_path, 
 int main(int argc, char **argv)
 {
     std::string data_type, dist_fn, index_path_prefix, result_path, query_file, gt_file, filter_label, label_type,
-        query_filters_file;
+        query_filters_file, entry_points_file;
     uint32_t num_threads, K;
     std::vector<uint32_t> Lvec;
     bool print_all_recalls, dynamic, tags, show_qps_per_thread;
@@ -331,6 +379,9 @@ int main(int argc, char **argv)
         optional_configs.add_options()("fail_if_recall_below",
                                        po::value<float>(&fail_if_recall_below)->default_value(0.0f),
                                        program_options_utils::FAIL_IF_RECALL_BELOW);
+        optional_configs.add_options()("entry_points_file",
+                                       po::value<std::string>(&entry_points_file)->default_value(std::string("")),
+                                       "Optional text file with one uint32 node id per line. If set, these nodes initialize the search candidate pool.");
 
         // Output controls
         po::options_description output_controls("Output controls");
@@ -403,6 +454,25 @@ int main(int argc, char **argv)
         return -1;
     }
 
+    std::vector<uint32_t> entry_points;
+    if (entry_points_file != "")
+    {
+        entry_points = read_entry_points_file(entry_points_file);
+        uint32_t min_search_l = std::numeric_limits<uint32_t>::max();
+        for (auto search_l : Lvec)
+        {
+            if (search_l >= K)
+                min_search_l = std::min(min_search_l, search_l);
+        }
+        if (min_search_l != std::numeric_limits<uint32_t>::max() && entry_points.size() > min_search_l)
+        {
+            std::cerr << "entry_points_file contains " << entry_points.size()
+                      << " unique entries, which exceeds min active search_list L=" << min_search_l
+                      << ". Reduce entries or increase all active L values." << std::endl;
+            return -1;
+        }
+    }
+
     std::vector<std::string> query_filters;
     if (filter_label != "")
     {
@@ -421,19 +491,19 @@ int main(int argc, char **argv)
             {
                 return search_memory_index<int8_t, uint16_t>(
                     metric, index_path_prefix, result_path, query_file, gt_file, num_threads, K, print_all_recalls,
-                    Lvec, dynamic, tags, show_qps_per_thread, query_filters, fail_if_recall_below);
+                    Lvec, dynamic, tags, show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else if (data_type == std::string("uint8"))
             {
                 return search_memory_index<uint8_t, uint16_t>(
                     metric, index_path_prefix, result_path, query_file, gt_file, num_threads, K, print_all_recalls,
-                    Lvec, dynamic, tags, show_qps_per_thread, query_filters, fail_if_recall_below);
+                    Lvec, dynamic, tags, show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else if (data_type == std::string("float"))
             {
                 return search_memory_index<float, uint16_t>(metric, index_path_prefix, result_path, query_file, gt_file,
                                                             num_threads, K, print_all_recalls, Lvec, dynamic, tags,
-                                                            show_qps_per_thread, query_filters, fail_if_recall_below);
+                                                            show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else
             {
@@ -447,19 +517,19 @@ int main(int argc, char **argv)
             {
                 return search_memory_index<int8_t>(metric, index_path_prefix, result_path, query_file, gt_file,
                                                    num_threads, K, print_all_recalls, Lvec, dynamic, tags,
-                                                   show_qps_per_thread, query_filters, fail_if_recall_below);
+                                                   show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else if (data_type == std::string("uint8"))
             {
                 return search_memory_index<uint8_t>(metric, index_path_prefix, result_path, query_file, gt_file,
                                                     num_threads, K, print_all_recalls, Lvec, dynamic, tags,
-                                                    show_qps_per_thread, query_filters, fail_if_recall_below);
+                                                    show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else if (data_type == std::string("float"))
             {
                 return search_memory_index<float>(metric, index_path_prefix, result_path, query_file, gt_file,
                                                   num_threads, K, print_all_recalls, Lvec, dynamic, tags,
-                                                  show_qps_per_thread, query_filters, fail_if_recall_below);
+                                                  show_qps_per_thread, query_filters, entry_points, fail_if_recall_below);
             }
             else
             {

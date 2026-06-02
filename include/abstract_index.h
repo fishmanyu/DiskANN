@@ -97,6 +97,8 @@ class AbstractIndex
 
     template <typename data_type> void set_start_points_at_random(data_type radius, uint32_t random_seed = 0);
 
+    virtual void set_search_entry_points(const std::vector<uint32_t> &entry_points) = 0;
+
     virtual consolidation_report consolidate_deletes(const IndexWriteParameters &parameters) = 0;
 
     virtual void optimize_index_layout() = 0;
